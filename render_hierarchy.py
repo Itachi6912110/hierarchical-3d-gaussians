@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import json
 import math
 import os
 import torch
@@ -43,6 +44,8 @@ def render_set(args, scene, pipe, out_dir, tau, eval):
     ssims = 0.0
     lpipss = 0.0
 
+    per_view = []
+
     cameras = scene.getTestCameras() if eval else scene.getTrainCameras()
 
     for viewpoint in tqdm(cameras):
@@ -67,6 +70,12 @@ def render_set(args, scene, pipe, out_dir, tau, eval):
         
         indices = render_indices[:to_render].int().contiguous()
         node_indices = nodes_for_render_indices[:to_render].contiguous()
+
+        # nodes[:, 0] is the node depth; 0 <=> leaf of the hierarchy
+        n_leaf_selected = int((scene.gaussians.nodes[node_indices.long(), 0] == 0).sum().item())
+        view_record = {"image": viewpoint.image_name,
+                       "selected_gaussians": int(to_render),
+                       "selected_leaves": n_leaf_selected}
 
         get_interpolation_weights(
             node_indices,
@@ -108,16 +117,36 @@ def render_set(args, scene, pipe, out_dir, tau, eval):
         if eval:
             image *= alpha_mask
             gt_image *= alpha_mask
-            psnr_test += psnr(image, gt_image).mean().double()
-            ssims += ssim(image, gt_image).mean().double()
-            lpipss += lpips(image, gt_image, net_type='vgg').mean().double()
+            view_psnr = psnr(image, gt_image).mean().double()
+            view_ssim = ssim(image, gt_image).mean().double()
+            view_lpips = lpips(image, gt_image, net_type='vgg').mean().double()
+            psnr_test += view_psnr
+            ssims += view_ssim
+            lpipss += view_lpips
+            view_record.update({"psnr": view_psnr.item(),
+                                "ssim": view_ssim.item(),
+                                "lpips": view_lpips.item()})
+        per_view.append(view_record)
 
         torch.cuda.empty_cache()
+
+    counts = [v["selected_gaussians"] for v in per_view]
+    summary = {"tau": tau,
+               "n_views": len(per_view),
+               "hierarchy_size": int(scene.gaussians._xyz.size(0)),
+               "skybox_points": int(scene.gaussians.skybox_points),
+               "avg_selected_gaussians": sum(counts) / max(len(counts), 1),
+               "min_selected_gaussians": min(counts, default=0),
+               "max_selected_gaussians": max(counts, default=0)}
     if eval and len(scene.getTestCameras()) > 0:
         psnr_test /= len(scene.getTestCameras())
         ssims /= len(scene.getTestCameras())
         lpipss /= len(scene.getTestCameras())
-        print(f"tau: {tau}, PSNR: {psnr_test:.5f} SSIM: {ssims:.5f} LPIPS: {lpipss:.5f}")
+        summary.update({"psnr": psnr_test.item(), "ssim": ssims.item(), "lpips": lpipss.item()})
+        print(f"tau: {tau}, PSNR: {psnr_test:.5f} SSIM: {ssims:.5f} LPIPS: {lpipss:.5f} avg gaussians: {summary['avg_selected_gaussians']:.0f}")
+    os.makedirs(render_path, exist_ok=True)
+    with open(os.path.join(render_path, "metrics.json"), "w") as f:
+        json.dump({"summary": summary, "per_view": per_view}, f, indent=2)
 
 if __name__ == "__main__":
     # Set up command line argument parser

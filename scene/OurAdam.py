@@ -110,7 +110,11 @@ class Adam(Optimizer):
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
-        self._cuda_graph_capture_health_check()
+        # torch >= 2.11 renamed _cuda_graph_capture_health_check
+        if hasattr(self, "_cuda_graph_capture_health_check"):
+            self._cuda_graph_capture_health_check()
+        else:
+            self._accelerator_graph_capture_health_check()
 
         loss = None
         if closure is not None:
